@@ -1,0 +1,5 @@
+[
+  {"id":"1","title":"Frontend Engineer, Growth","company":"Nimbus Labs","location":"Remote (US)","salary":"$130k–$160k","description":"We're looking for a frontend engineer with React, TypeScript, and CI/CD experience to join our growth team. GraphQL experience a plus.","url":"https://example.com/jobs/1","source":"mock","posted":"2026-09-08"},
+  {"id":"2","title":"Full Stack Developer","company":"Aurora Health","location":"Austin, TX","salary":"$115k–$140k","description":"Full stack role using Node.js, SQL, and React. AWS experience preferred.","url":"https://example.com/jobs/2","source":"mock","posted":"2026-09-09"},
+  {"id":"3","title":"Senior Software Engineer","company":"Vantage Systems","location":"Remote","salary":"$150k–$185k","description":"Senior engineer for our platform team. System design and Python required. Docker/Kubernetes a plus.","url":"https://example.com/jobs/3","source":"mock","posted":"2026-09-06"}
+]
