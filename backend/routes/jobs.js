@@ -4,7 +4,35 @@ const router = express.Router();
 
 const MOCK_JOBS = require("../data/mockJobs.json");
 
+// Splits a Dice/Google-style boolean query into positive and negative (-term) keywords.
+// "Java developer C2C -bench -sales -w2 -fulltime -hotlist" ->
+//   { include: "Java developer C2C", excludeTerms: ["bench","sales","w2","fulltime","hotlist"] }
+function parseBooleanQuery(raw) {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  const include = [];
+  const excludeTerms = [];
+  for (const t of tokens) {
+    if (t.startsWith("-") && t.length > 1) {
+      excludeTerms.push(t.slice(1).toLowerCase());
+    } else {
+      include.push(t);
+    }
+  }
+  return { include: include.join(" "), excludeTerms };
+}
+
+// Belt-and-suspenders filter applied after any provider's results come back,
+// since not every API reliably honors an exclude parameter.
+function removeExcluded(jobs, excludeTerms) {
+  if (!excludeTerms.length) return jobs;
+  return jobs.filter((j) => {
+    const haystack = `${j.title} ${j.description} ${j.company}`.toLowerCase();
+    return !excludeTerms.some((term) => haystack.includes(term));
+  });
+}
+
 // GET /api/jobs?query=frontend+engineer&location=remote
+// Supports Dice/Google-style boolean queries, e.g. "Java developer C2C -bench -sales -w2 -hotlist"
 // Live mode: Adzuna (free, https://developer.adzuna.com) if ADZUNA_APP_ID/KEY set,
 // otherwise RapidAPI "JSearch" (aggregates LinkedIn/Indeed/Glassdoor legally) if RAPIDAPI_KEY set,
 // otherwise falls back to bundled mock data so the app still works with zero setup.
@@ -14,18 +42,24 @@ const MOCK_JOBS = require("../data/mockJobs.json");
 // APIs / licensed aggregators instead (Adzuna, JSearch, USAJobs, Greenhouse job boards API, etc).
 router.get("/", async (req, res) => {
   const { query = "software engineer", location = "remote" } = req.query;
+  const { include, excludeTerms } = parseBooleanQuery(query);
+  const what = include || query; // fall back to raw query if it was all minus-terms
 
   try {
     if (process.env.ADZUNA_APP_ID && process.env.ADZUNA_APP_KEY) {
-      const url = `https://api.adzuna.com/v1/api/jobs/us/search/1?app_id=${process.env.ADZUNA_APP_ID}&app_key=${process.env.ADZUNA_APP_KEY}&results_per_page=20&what=${encodeURIComponent(query)}&where=${encodeURIComponent(location)}`;
+      let url = `https://api.adzuna.com/v1/api/jobs/us/search/1?app_id=${process.env.ADZUNA_APP_ID}&app_key=${process.env.ADZUNA_APP_KEY}&results_per_page=20&what=${encodeURIComponent(what)}&where=${encodeURIComponent(location)}`;
+      if (excludeTerms.length) {
+        url += `&what_exclude=${encodeURIComponent(excludeTerms.join(" "))}`;
+      }
       const r = await fetch(url);
       const data = await r.json();
-      const jobs = (data.results || []).map(normalizeAdzuna);
+      let jobs = (data.results || []).map(normalizeAdzuna);
+      jobs = removeExcluded(jobs, excludeTerms);
       return res.json({ source: "adzuna", jobs });
     }
 
     if (process.env.RAPIDAPI_KEY) {
-      const url = `https://jsearch.p.rapidapi.com/search?query=${encodeURIComponent(query + " " + location)}&num_pages=1`;
+      const url = `https://jsearch.p.rapidapi.com/search?query=${encodeURIComponent(what + " " + location)}&num_pages=1`;
       const r = await fetch(url, {
         headers: {
           "X-RapidAPI-Key": process.env.RAPIDAPI_KEY,
@@ -33,12 +67,21 @@ router.get("/", async (req, res) => {
         },
       });
       const data = await r.json();
-      const jobs = (data.data || []).map(normalizeJSearch);
+      let jobs = (data.data || []).map(normalizeJSearch);
+      jobs = removeExcluded(jobs, excludeTerms);
       return res.json({ source: "jsearch", jobs });
     }
 
-    // Demo fallback
-    return res.json({ source: "mock", jobs: MOCK_JOBS });
+    // Demo fallback — filter the bundled mock jobs so typing something like
+    // "Java" vs "frontend" actually changes what you see instead of always
+    // returning the same 3 jobs regardless of query.
+    const includeTerms = include.toLowerCase().split(/\s+/).filter(Boolean);
+    let jobs = MOCK_JOBS.filter((j) => {
+      const haystack = `${j.title} ${j.description}`.toLowerCase();
+      return includeTerms.length === 0 || includeTerms.some((term) => haystack.includes(term));
+    });
+    jobs = removeExcluded(jobs, excludeTerms);
+    return res.json({ source: "mock", jobs, note: "Demo data — add ADZUNA_APP_ID/KEY or RAPIDAPI_KEY for real listings." });
   } catch (err) {
     console.error("Job search failed:", err.message);
     return res.json({ source: "mock-fallback", jobs: MOCK_JOBS, warning: err.message });
