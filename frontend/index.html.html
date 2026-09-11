@@ -602,32 +602,136 @@ function JobFinder({onAnalyze, savedIds, onSave, apiBase}){
 }
 
 /* ---------------- RESUME LAB ---------------- */
-function ResumeLab({job}){
-  const [uploaded, setUploaded] = useState(true);
+function ResumeLab({job, apiBase}){
+  const live = Boolean(apiBase);
+  const fileInputRef = React.useRef(null);
+
+  // Demo-mode state (used only when no backend is connected)
+  const [uploaded, setUploaded] = useState(!live);
+
+  // Live-mode state
+  const [fileName, setFileName] = useState(null);
+  const [resumeText, setResumeText] = useState("");
+  const [wordCount, setWordCount] = useState(0);
+  const [parsing, setParsing] = useState(false);
+  const [parseError, setParseError] = useState(null);
+
   const [analyzing, setAnalyzing] = useState(false);
   const [done, setDone] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState(null);
+  const [matchResult, setMatchResult] = useState(null); // {score, have, miss, explanation}
+  const [optimized, setOptimized] = useState(null); // {text, note}
+  const [pdfBusy, setPdfBusy] = useState(false);
 
-  const missing = job ? job.miss : ["GraphQL","AWS"];
-  const atsBase = job ? job.match : 71;
+  const jobDescription = job
+    ? (job.description || `${job.title} at ${job.company}. Key skills: ${[...(job.have||[]),...(job.miss||[])].join(", ")}.`)
+    : "General software engineer role requiring strong fundamentals, collaboration, and problem solving.";
 
-  function runAnalysis(){
-    setAnalyzing(true); setDone(false);
-    setTimeout(()=>{ setAnalyzing(false); setDone(true); }, 1400);
+  const missing = matchResult ? matchResult.miss : (job ? job.miss : ["GraphQL","AWS"]);
+  const atsBase = matchResult ? matchResult.score : (job ? job.match : 71);
+
+  function openFilePicker(){
+    if (!live) { setUploaded(true); return; } // demo mode: no real file needed
+    fileInputRef.current && fileInputRef.current.click();
+  }
+
+  async function handleFileChange(e){
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    setParseError(null); setParsing(true); setDone(false); setMatchResult(null); setOptimized(null);
+    try {
+      const form = new FormData();
+      form.append("resume", file);
+      const r = await fetch(`${apiBase}/api/resume/parse`, { method: "POST", body: form });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "Failed to parse resume.");
+      setFileName(file.name);
+      setResumeText(data.text || "");
+      setWordCount(data.wordCount || 0);
+    } catch (err) {
+      setParseError("Could not parse that file: " + err.message);
+    } finally {
+      setParsing(false);
+    }
+  }
+
+  async function runAnalysis(){
+    if (!live) {
+      // Demo mode: simulated analysis, same as before, so the page still works with no backend.
+      setAnalyzing(true); setDone(false);
+      setTimeout(()=>{ setAnalyzing(false); setDone(true); }, 1400);
+      return;
+    }
+    if (!resumeText) { setAnalyzeError("Upload a resume first."); return; }
+    setAnalyzing(true); setDone(false); setAnalyzeError(null);
+    try {
+      const matchRes = await fetch(`${apiBase}/api/match`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ resumeText, jobDescription }),
+      });
+      const match = await matchRes.json();
+      if (!matchRes.ok) throw new Error(match.error || "Match scoring failed.");
+      setMatchResult(match);
+
+      const optRes = await fetch(`${apiBase}/api/resume/optimize`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ resumeText, jobDescription, missingSkills: match.miss || [] }),
+      });
+      const opt = await optRes.json();
+      if (!optRes.ok) throw new Error(opt.error || "Resume optimization failed.");
+      setOptimized({ text: opt.optimized, note: opt.note });
+      setDone(true);
+    } catch (err) {
+      setAnalyzeError(err.message);
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function downloadOptimizedPdf(){
+    if (!live || !optimized) return;
+    setPdfBusy(true);
+    try {
+      const outName = (fileName || "resume").replace(/\.[^.]+$/, "") + "_optimized.pdf";
+      const r = await fetch(`${apiBase}/api/resume/pdf`, {
+        method: "POST", headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({ text: optimized.text, fileName: outName }),
+      });
+      if (!r.ok) throw new Error("PDF generation failed.");
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = outName;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setAnalyzeError(err.message);
+    } finally {
+      setPdfBusy(false);
+    }
   }
 
   return (
     <div className="fade-in">
       <div className="page-head">
         <h1 className="page-title">AI Resume Lab</h1>
-        <p className="page-sub">{job ? <>Analyzing your resume against <b>{job.title}</b> at {job.company}.</> : "Upload a resume and pick a job description to benchmark against."}</p>
+        <p className="page-sub">
+          {live
+            ? (job ? <>Analyzing your resume against <b>{job.title}</b> at {job.company}, using your connected backend.</> : "Upload a real resume — parsed and scored by your connected backend.")
+            : (job ? <>Analyzing your resume against <b>{job.title}</b> at {job.company}.</> : "Sample mode — connect your backend in the sidebar to upload and analyze a real resume.")}
+        </p>
       </div>
 
       <div className="two-col" style={{marginBottom:16}}>
         <div className="card card-pad">
           <div className="section-title">1. Resume</div>
-          <div className={"upload-zone"+(uploaded?" filled":"")} onClick={()=>setUploaded(true)}>
-            {uploaded ? "✓ resume_alex_morgan.pdf — parsed (412 words)" : "Click to upload your resume (.pdf, .docx)"}
+          <input ref={fileInputRef} type="file" accept=".pdf,.docx" style={{display:"none"}} onChange={handleFileChange}/>
+          <div className={"upload-zone"+((live?Boolean(resumeText):uploaded)?" filled":"")} onClick={openFilePicker}>
+            {live
+              ? (parsing ? "Parsing…" : resumeText ? `✓ ${fileName} — parsed (${wordCount} words)` : "Click to upload your resume (.pdf, .docx)")
+              : (uploaded ? "✓ resume_alex_morgan.pdf — parsed (412 words)" : "Click to upload your resume (.pdf, .docx)")}
           </div>
+          {parseError && <div style={{color:"var(--red, #e5484d)", fontSize:12.5, marginTop:8}}>{parseError}</div>}
         </div>
         <div className="card card-pad">
           <div className="section-title">2. Job description</div>
@@ -637,9 +741,10 @@ function ResumeLab({job}){
         </div>
       </div>
 
-      <button className="btn btn-primary" onClick={runAnalysis} disabled={analyzing}>
+      <button className="btn btn-primary" onClick={runAnalysis} disabled={analyzing || (live && parsing)}>
         {analyzing ? <><span className="spin">⟳</span> Analyzing…</> : "Run AI analysis"}
       </button>
+      {analyzeError && <div style={{color:"var(--red, #e5484d)", fontSize:12.5, marginTop:8}}>{analyzeError}</div>}
 
       {done && (
         <div className="card card-pad fade-in" style={{marginTop:18}}>
@@ -647,29 +752,48 @@ function ResumeLab({job}){
             <Ring value={atsBase}/>
             <div>
               <div style={{fontWeight:650, fontSize:14}}>ATS match score</div>
-              <div style={{fontSize:12.5, color:"var(--text-mid)"}}>Based on keyword overlap, structure, and quantified impact.</div>
+              <div style={{fontSize:12.5, color:"var(--text-mid)"}}>
+                {live && matchResult ? matchResult.explanation : "Based on keyword overlap, structure, and quantified impact."}
+              </div>
             </div>
           </div>
 
           <div className="section-title" style={{fontSize:12.5}}>Missing keywords</div>
           <div style={{marginBottom:16}}>
-            {missing.map(m=><span className="kw-chip" key={m}>+ {m}</span>)}
+            {(missing||[]).map(m=><span className="kw-chip" key={m}>+ {m}</span>)}
+            {live && (!missing || !missing.length) && <span style={{fontSize:12.5, color:"var(--text-mid)"}}>No gaps detected against this description.</span>}
           </div>
 
           <div className="section-title" style={{fontSize:12.5}}>Before / after optimization</div>
-          <div className="before-after">
-            <div className="ba-col before">
-              <div className="ba-label">BEFORE</div>
-              "Responsible for building features for the web application and fixing bugs reported by users."
+          {live ? (
+            <div className="before-after">
+              <div className="ba-col before">
+                <div className="ba-label">BEFORE (your uploaded resume)</div>
+                {resumeText.slice(0, 400)}{resumeText.length > 400 ? "…" : ""}
+              </div>
+              <div className="ba-col after">
+                <div className="ba-label">AFTER — AI OPTIMIZED</div>
+                {optimized ? optimized.text.slice(0, 400) + (optimized.text.length > 400 ? "…" : "") : "—"}
+                {optimized && optimized.note && <div style={{marginTop:8, fontSize:11.5, color:"var(--text-mid)"}}>{optimized.note}</div>}
+              </div>
             </div>
-            <div className="ba-col after">
-              <div className="ba-label">AFTER — AI OPTIMIZED</div>
-              "Shipped 14 customer-facing features and resolved 60+ reported defects, cutting average bug-resolution time by 35% ({missing[0] || "React"} / {missing[1] || "TypeScript"})."
+          ) : (
+            <div className="before-after">
+              <div className="ba-col before">
+                <div className="ba-label">BEFORE</div>
+                "Responsible for building features for the web application and fixing bugs reported by users."
+              </div>
+              <div className="ba-col after">
+                <div className="ba-label">AFTER — AI OPTIMIZED</div>
+                "Shipped 14 customer-facing features and resolved 60+ reported defects, cutting average bug-resolution time by 35% ({missing[0] || "React"} / {missing[1] || "TypeScript"})."
+              </div>
             </div>
-          </div>
+          )}
 
           <div style={{marginTop:16, display:"flex", gap:8}}>
-            <button className="btn btn-primary">⬇ Generate optimized PDF</button>
+            <button className="btn btn-primary" onClick={live ? downloadOptimizedPdf : undefined} disabled={live && (pdfBusy || !optimized)}>
+              {pdfBusy ? "Generating…" : "⬇ Generate optimized PDF"}
+            </button>
             <button className="btn">Save to Application Copilot</button>
           </div>
         </div>
@@ -948,7 +1072,7 @@ function App(){
         <div style={{display:"none"}} className="mobile-toggle"></div>
         {page==="dashboard" && <Dashboard setPage={setPage}/>}
         {page==="finder" && <JobFinder onAnalyze={analyze} savedIds={savedIds} onSave={save} apiBase={apiBase}/>}
-        {page==="resume" && <ResumeLab job={activeJob}/>}
+        {page==="resume" && <ResumeLab job={activeJob} apiBase={apiBase}/>}
         {page==="copilot" && <Copilot job={activeJob}/>}
         {page==="tracker" && <Tracker/>}
         {page==="analytics" && <Analytics/>}
